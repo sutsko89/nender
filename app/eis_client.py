@@ -1,4 +1,25 @@
-"""Модуль получения закупок с ЕИС без авторизации."""
+"""Модуль получения закупок с ЕИС.
+
+Структура HTML-карточки (2025-2026):
+
+  .registry-entry__header-top__title       <- Тип (ФЗ, вид процедуры)
+  .registry-entry__header-mid__number a   <- номер + ссылка
+  .registry-entry__header-mid__title      <- статус ("Закупка завершена")
+
+  .registry-entry__body-block (1-й):
+    .registry-entry__body-title = "Объект закупки"
+    .registry-entry__body-value             <- название (внутри может быть <span.highlightColor>)
+
+  .registry-entry__body-block (2-й):
+    .registry-entry__body-title = "Заказчик"
+    .registry-entry__body-href a            <- название орг, href содержит inn=...
+
+  .price-block__value                      <- цена
+  .data-block__value (первый)             <- дата размещения
+
+  Регион в карточке НЕ указан. Фильтрация по региону
+  выполняется на стороне ЕИС (параметр customerPlace).
+"""
 
 import re
 import time
@@ -9,7 +30,7 @@ from typing import List, Dict, Optional
 import requests
 from bs4 import BeautifulSoup
 
-from app.db import log, get_settings
+from app.db import log
 
 BASE_URL = "https://zakupki.gov.ru"
 SEARCH_URL = BASE_URL + "/epz/order/extendedsearch/results.html"
@@ -34,9 +55,6 @@ class EISClient:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
-
-    def reload_settings(self):
-        pass
 
     def check_connection(self) -> tuple:
         try:
@@ -144,8 +162,9 @@ class EISClient:
 
     def _fetch_html_results(self, params: dict, context: str = "") -> List[Dict]:
         try:
-            log("eis_client", f"Запрос к ЕИС [{context}]: {SEARCH_URL}?" +
-                "&".join(f"{k}={v}" for k, v in params.items() if v))
+            log("eis_client",
+                f"Запрос к ЕИС [{context}]: {SEARCH_URL}?"
+                + "&".join(f"{k}={v}" for k, v in params.items() if v))
             resp = self.session.get(SEARCH_URL, params=params, timeout=30)
             resp.raise_for_status()
             tenders = self._parse_html(resp.text)
@@ -158,48 +177,28 @@ class EISClient:
             log("eis_client", f"Нет соединения [{context}]: {e}", level="ERROR")
             return []
         except Exception as e:
-            log("eis_client", f"Ошибка [{context}]: {e}", level="ERROR", details=str(e))
+            log("eis_client", f"Ошибка [{context}]: {e}", level="ERROR")
             return []
 
     def _parse_html(self, html: str) -> List[Dict]:
         soup = BeautifulSoup(html, "html.parser")
-        tenders = []
         cards = soup.select(".registry-entry__form")
-        if not cards:
-            cards = soup.select(".search-registry-entry-block")
-        if not cards:
-            cards = soup.select("div[class*='registry-entry']") or soup.select(".order-row")
-
+        tenders = []
         for card in cards:
             try:
-                tender = self._parse_card(card)
-                if tender and tender.get("external_id"):
-                    tenders.append(tender)
+                t = self._parse_card(card)
+                if t and t.get("external_id"):
+                    tenders.append(t)
             except Exception as e:
                 log("eis_client", f"Ошибка парсинга карточки: {e}", level="WARNING")
         return tenders
 
     def _parse_card(self, card) -> Optional[Dict]:
-        """
-        Разбор карточки закупки с сайта ЕИС.
-
-        Структура HTML-карточки (актуальная вёрстка):
-
-          .registry-entry__header-top         <- статус ("Размещена")
-          .registry-entry__header-mid         <- номер закупки
-            .registry-entry__header-mid__number a  <- номер + ссылка
-          .registry-entry__body               <- тело
-            блок «Объект закупки»    <- название (значение после label)
-            блок «Заказчик»             <- название организации + ИНН
-            блок «Регион»               <- регион (на основе label)
-            блок «Дата»                 <- дата публикации
-        """
         # --- Номер и ссылка ---
         number_el = card.select_one(".registry-entry__header-mid__number a")
         if not number_el:
             return None
-
-        purchase_number = number_el.get_text(strip=True)
+        purchase_number = number_el.get_text(strip=True).lstrip("\u2116 ")
         source_url = number_el.get("href", "")
         if source_url and not source_url.startswith("http"):
             source_url = BASE_URL + source_url
@@ -209,78 +208,55 @@ class EISClient:
         if m:
             external_id = m.group(1)
 
-        # --- Статус ---
-        status_el = card.select_one(".registry-entry__header-top__title span")
-        if not status_el:
-            status_el = card.select_one(".registry-entry__header-top__title")
+        # --- Статус: .registry-entry__header-mid__title ---
+        status_el = card.select_one(".registry-entry__header-mid__title")
         status = status_el.get_text(strip=True) if status_el else ""
 
-        # --- Парсинг блоков по label ---
-        # Все блоки вида:
-        #   <div class="registry-entry__body-block">
-        #     <span class="registry-entry__body-title">Объект закупки</span>
-        #     <span class="registry-entry__body-value">...название...</span>
-        #   </div>
+        # --- Название закупки: первый .registry-entry__body-value ---
+        # Внутри может быть <span class="highlightColor">электрод</span>
+        # get_text() сцепляет все части вместе, но без separator слипаются слова
+        title_block = card.select_one(".registry-entry__body-value")
         title = ""
+        if title_block:
+            # Вставляем пробел перед каждым <span>, чтобы не слипались слова
+            for span in title_block.find_all("span"):
+                span.insert_before(" ")
+            title = " ".join(title_block.get_text().split())
+
+        # --- Заказчик: имя из .registry-entry__body-href a, ИНН из href ---
         customer_name = ""
         customer_inn = ""
-        region = ""
+        customer_link = card.select_one(".registry-entry__body-href a")
+        if customer_link:
+            customer_name = customer_link.get_text(strip=True)
+            href = customer_link.get("href", "")
+            m_inn = re.search(r"[?&]inn=(\d{10,12})", href)
+            if m_inn:
+                customer_inn = m_inn.group(1)
+
+        # --- Цена ---
+        price = ""
+        price_el = card.select_one(".price-block__value")
+        if price_el:
+            price = price_el.get_text(strip=True)
+
+        # --- Дата размещения: первый .data-block__value ---
         publish_date = ""
+        date_el = card.select_one(".data-block__value")
+        if date_el:
+            publish_date = self._normalize_date(date_el.get_text(strip=True))
 
-        for block in card.select(".registry-entry__body-block"):
-            label_el = block.select_one(".registry-entry__body-title")
-            value_el = block.select_one(".registry-entry__body-value")
-            if not label_el or not value_el:
-                continue
-            label = label_el.get_text(strip=True).lower()
-            value = value_el.get_text(" ", strip=True)
-
-            if "объект" in label or "предмет" in label:
-                title = value
-            elif "заказчик" in label:
-                customer_name = value
-                # ИНН часто в соседнем блоке или внутри value
-                inn_m = re.search(r"\b(\d{10}|\d{12})\b", value)
-                if inn_m:
-                    customer_inn = inn_m.group(1)
-            elif "инн" in label:
-                inn_m = re.search(r"\b(\d{10}|\d{12})\b", value)
-                if inn_m:
-                    customer_inn = inn_m.group(1)
-            elif "регион" in label or "место" in label:
-                region = value
-            elif "дата" in label or "размещен" in label:
-                publish_date = self._normalize_date(value)
-
-        # --- Запасные варианты ---
-        # Если title всё ещё пустой — берём первый .registry-entry__body-value
-        if not title:
-            val = card.select_one(".registry-entry__body-value")
-            if val:
-                title = val.get_text(strip=True)
-
-        # Дата из .data-block
-        if not publish_date:
-            date_el = card.select_one(".data-block__value")
-            if date_el:
-                publish_date = self._normalize_date(date_el.get_text(strip=True))
-
-        # ИНН из ссылки на заказчика
-        if not customer_inn:
-            customer_link = card.select_one(".registry-entry__body-href a")
-            if customer_link:
-                if not customer_name:
-                    customer_name = customer_link.get_text(strip=True)
-                href = customer_link.get("href", "")
-                m_inn = re.search(r"inn=(\d{10,12})", href)
-                if m_inn:
-                    customer_inn = m_inn.group(1)
+        # --- Регион: не передаётся в карточке ЕИС ---
+        # Фильтрация по региону уже выполнена на стороне ЕИС
+        # через параметр customerPlace.
+        region = ""
 
         return {
             "external_id": external_id,
             "purchase_number": purchase_number,
             "title": title,
             "publish_date": publish_date,
+            "price": price,
             "region": region,
             "customer_name": customer_name,
             "customer_inn": customer_inn,
@@ -310,7 +286,6 @@ def fetch_rss_tenders(keyword: str, region: Optional[str] = None) -> List[Dict]:
     }
     if region:
         params["customerPlace"] = region
-
     try:
         resp = requests.get(RSS_URL, params=params, headers=HEADERS, timeout=20)
         resp.raise_for_status()
@@ -349,6 +324,7 @@ def _parse_rss(xml_text: str) -> List[Dict]:
                     "purchase_number": external_id,
                     "title": title,
                     "publish_date": publish_date,
+                    "price": "",
                     "region": "",
                     "customer_name": "",
                     "customer_inn": "",
