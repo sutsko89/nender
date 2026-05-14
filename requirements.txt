@@ -1,0 +1,5 @@
+PySide6>=6.7.0
+requests>=2.32.0
+schedule>=1.2.0
+openpyxl>=3.1.0
+python-dateutil>=2.9.0
