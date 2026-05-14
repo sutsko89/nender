@@ -20,11 +20,22 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db():
-    """Инициализация базы данных по схеме."""
+    """Инициализация базы данных по схеме + миграции для существующих БД."""
     with get_connection() as conn:
         with open(SCHEMA_PATH, encoding="utf-8") as f:
             conn.executescript(f.read())
+        # Миграции: добавляем новые колонки в существующую БД если их нет
+        _migrate(conn)
     log("db", "База данных инициализирована")
+
+
+def _migrate(conn: sqlite3.Connection):
+    """Применяет миграции для существующих БД без пересоздания."""
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(tenders)").fetchall()
+    }
+    if "price" not in existing:
+        conn.execute("ALTER TABLE tenders ADD COLUMN price TEXT")
 
 
 # --- Настройки ------------------------------------------------------------------
@@ -49,7 +60,7 @@ def save_settings(data: Dict):
             conn.execute(f"INSERT INTO app_settings ({keys}) VALUES ({placeholders})", list(data.values()))
 
 
-# --- Поисковые профили ----------------------------------------------------------
+# --- Поисковые профили --------------------------------------------------------------
 
 def get_all_profiles() -> List[Dict]:
     with get_connection() as conn:
@@ -83,7 +94,6 @@ def get_profile(profile_id: int) -> Optional[Dict]:
 
 
 def save_profile(data: Dict) -> int:
-    """Создать или обновить профиль. Возвращает id."""
     inn_list = data.pop("inn_list", [])
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data["keywords"] = json.dumps(data.get("keywords", []), ensure_ascii=False)
@@ -134,7 +144,6 @@ def update_profile_last_email(profile_id: int):
 # --- Закупки и результаты -------------------------------------------------------
 
 def upsert_tender(tender: Dict) -> int:
-    """Сохранить закупку. Если уже есть — вернуть id."""
     with get_connection() as conn:
         row = conn.execute(
             "SELECT id FROM tenders WHERE external_id=?", (tender["external_id"],)
@@ -152,7 +161,6 @@ def upsert_tender(tender: Dict) -> int:
 
 
 def add_search_result(profile_id: int, tender_id: int) -> bool:
-    """Добавить связь профиль—закупка. Возвращает True если закупка новая."""
     with get_connection() as conn:
         row = conn.execute(
             "SELECT id, email_sent FROM search_results WHERE search_profile_id=? AND tender_id=?",

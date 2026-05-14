@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS tenders (
     purchase_number TEXT,
     title TEXT,
     publish_date TEXT,
+    price TEXT,
     region TEXT,
     customer_name TEXT,
     customer_inn TEXT,
