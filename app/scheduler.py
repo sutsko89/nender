@@ -63,16 +63,18 @@ class TenderScheduler:
         inn_list = profile.get("inn_list", [])
         keywords = profile.get("keywords", [])
         region = profile.get("region") or ""
+        city = profile.get("city") or ""
 
         raw_tenders = []
 
-        # Путь 1: HTML-поиск через EISClient (по ИНН или ключевым словам)
+        # Путь 1: HTML-поиск (по ИНН или по ключевым словам)
         if inn_list or keywords:
             try:
                 client = EISClient()
                 raw_tenders = client.search_tenders(
                     inn_list=inn_list,
                     region=region,
+                    city=city,
                     keywords=keywords,
                 )
             except Exception as e:
@@ -89,7 +91,10 @@ class TenderScheduler:
                         raw_tenders.append(t)
                 time.sleep(1)
 
+        # Применяем фильтры только по региону/городу/ИНН
+        # Ключевые слова НЕ перефильтровываем — ЕИС уже выполнил морфологический поиск
         filtered = apply_filters(raw_tenders, profile)
+
         log(
             "scheduler",
             f"Профиль '{profile['name']}': "
