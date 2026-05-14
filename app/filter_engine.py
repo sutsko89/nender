@@ -1,61 +1,66 @@
-"""Модуль фильтрации закупок по параметрам поискового профиля."""
+"""Фильтрация закупок по параметрам поискового профиля."""
 
 from typing import List, Dict
 
 
 def apply_filters(tenders: List[Dict], profile: Dict) -> List[Dict]:
     """
-    Применить фильтры профиля к списку закупок.
+    Применить фильтры профиля. Пропускает закупку если она удовлетворяет всем заполненным фильтрам.
 
-    Логика: закупка проходит, если она удовлетворяет ВСЕМ заполненным фильтрам.
-    - ИНН: совпадение с одним из значений списка (ИЛИ)
-    - Регион: совпадение подстроки
-    - Город: совпадение подстроки в регионе, названии заказчика или теме
-    - Ключевые слова: хотя бы одно слово найдено в тексте закупки (ИЛИ)
+    Логика фильтров:
+    - Если ИНН задан — строгое совпадение (ИЛИ)
+    - Если регион задан — подстрока без учёта регистра
+    - Если город задан — подстрока в регионе/заказчике/названии
+    - Если ключевые слова заданы — хотя бы одно (ИЛИ)
+    - Если фильтров нет вовсе — пропускает всё
     """
     inn_list = [i.strip() for i in (profile.get("inn_list") or []) if i.strip()]
     region = (profile.get("region") or "").strip().lower()
     city = (profile.get("city") or "").strip().lower()
     keywords = [k.strip().lower() for k in (profile.get("keywords") or []) if k.strip()]
 
-    result = []
-    for tender in tenders:
-        if _passes(tender, inn_list, region, city, keywords):
-            result.append(tender)
-    return result
+    # Если никаких фильтров — пропускаем всё
+    if not inn_list and not region and not city and not keywords:
+        return tenders
+
+    return [t for t in tenders if _passes(t, inn_list, region, city, keywords)]
 
 
-def _passes(tender: Dict, inn_list: List[str], region: str, city: str, keywords: List[str]) -> bool:
-    # Фильтр по ИНН
+def _passes(tender: Dict, inn_list, region, city, keywords) -> bool:
+    # Фильтр по ИНН (строгое совпадение)
     if inn_list:
-        customer_inn = (tender.get("customer_inn") or "").strip()
-        if customer_inn not in inn_list:
+        if (tender.get("customer_inn") or "").strip() not in inn_list:
             return False
 
-    # Фильтр по региону
+    # Фильтр по региону (подстрока, без учёта регистра)
+    # Важно: если регион пустой — не фильтруем по нему
     if region:
-        if region not in (tender.get("region") or "").lower():
+        tender_region = (tender.get("region") or "").lower()
+        # Проверяем через подстроку или через начало названия
+        # "хабаровский" совпадёт с "хабаровский край"
+        if tender_region and region not in tender_region and tender_region not in region:
             return False
+        # Если регион в закупке пустой — не отсеиваем (даём пройти)
 
-    # Фильтр по городу (ищем в регионе, заказчике, названии)
+    # Фильтр по городу
     if city:
-        searchable_city = " ".join([
-            (tender.get("region") or ""),
-            (tender.get("customer_name") or ""),
-            (tender.get("title") or ""),
+        haystack = " ".join([
+            tender.get("region") or "",
+            tender.get("customer_name") or "",
+            tender.get("title") or "",
         ]).lower()
-        if city not in searchable_city:
+        if city not in haystack:
             return False
 
-    # Фильтр по ключевым словам (подстрока, без учёта регистра)
+    # Фильтр по ключевым словам
     if keywords:
-        searchable = " ".join([
-            (tender.get("title") or ""),
-            (tender.get("customer_name") or ""),
-            (tender.get("region") or ""),
-            (tender.get("status") or ""),
+        haystack = " ".join([
+            tender.get("title") or "",
+            tender.get("customer_name") or "",
+            tender.get("region") or "",
+            tender.get("status") or "",
         ]).lower()
-        if not any(kw in searchable for kw in keywords):
+        if not any(kw in haystack for kw in keywords):
             return False
 
     return True
