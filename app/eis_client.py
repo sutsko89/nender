@@ -13,7 +13,7 @@
   fz44             — on (включить 44-ФЗ)
   fz223            — on (включить 223-ФЗ)
   customerPlace    — название региона (русским)
-  customerInn      — ИНН заказчика
+  customerIdOrg    — ИНН заказчика (НЕ customerInn!)
   publishDateFrom  — дата от (DD.MM.YYYY)
   publishDateTo    — дата до (DD.MM.YYYY)
 
@@ -44,7 +44,11 @@ HEADERS = {
     ),
     "Accept-Language": "ru-RU,ru;q=0.9",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://zakupki.gov.ru/epz/main/public/home.html",
 }
+
+# Окно поиска по умолчанию — 7 дней (чтобы не пропустить закупки с задержкой индексации)
+DEFAULT_DAYS_BACK = 7
 
 
 class EISClient:
@@ -55,11 +59,9 @@ class EISClient:
         self.session.headers.update(HEADERS)
 
     def reload_settings(self):
-        """API-совместимость с интерфейсом главного окна (заготовка)."""
         pass
 
     def check_connection(self) -> tuple:
-        """Проверить доступность публичного поиска ЕИС."""
         try:
             resp = self.session.get(
                 BASE_URL + "/epz/main/public/home.html", timeout=15
@@ -74,10 +76,6 @@ class EISClient:
         except Exception as e:
             return False, str(e)
 
-    # ------------------------------------------------------------------
-    # Главный метод: поиск по профилю
-    # ------------------------------------------------------------------
-
     def search_tenders(
         self,
         inn_list: List[str],
@@ -89,23 +87,15 @@ class EISClient:
         page: int = 1,
         page_size: int = 50,
     ) -> List[Dict]:
-        """
-        Получить закупки через публичный поиск ЕИС.
-
-        Стратегия:
-          1. Если есть ИНН — делаем отдельный запрос по каждому ИНН
-          2. Если есть ключевые слова без ИНН — поиск по каждому слову
-          3. Далее фильтрация по региону/городу через filter_engine
-        """
+        # --- Исправление 2: окно 7 дней по умолчанию ---
         if not date_from:
-            date_from = (datetime.now() - timedelta(days=1)).strftime("%d.%m.%Y")
+            date_from = (datetime.now() - timedelta(days=DEFAULT_DAYS_BACK)).strftime("%d.%m.%Y")
         if not date_to:
             date_to = datetime.now().strftime("%d.%m.%Y")
 
         all_tenders: List[Dict] = []
         seen_ids: set = set()
 
-        # По ИНН
         if inn_list:
             for inn in inn_list:
                 tenders = self._search_by_inn(
@@ -121,9 +111,8 @@ class EISClient:
                     if t["external_id"] not in seen_ids:
                         seen_ids.add(t["external_id"])
                         all_tenders.append(t)
-                time.sleep(1)  # вежливость
+                time.sleep(1)
 
-        # По ключевым словам (если есть и нет ИНН, или хотят дополнить)
         if keywords and not inn_list:
             for kw in keywords:
                 tenders = self._search_by_keyword(
@@ -147,10 +136,6 @@ class EISClient:
         )
         return all_tenders
 
-    # ------------------------------------------------------------------
-    # Внутренние методы
-    # ------------------------------------------------------------------
-
     def _search_by_inn(
         self,
         inn: str,
@@ -161,9 +146,9 @@ class EISClient:
         page: int,
         page_size: int,
     ) -> List[Dict]:
-        """HTML-парсинг результатов по ИНН заказчика."""
+        # --- Исправление 1: customerInn → customerIdOrg ---
         params = {
-            "searchString": " ".join(keywords) if keywords else inn,
+            "searchString": " ".join(keywords) if keywords else "",
             "morphology": "on",
             "search-filter": "Дате размещения",
             "pageNumber": str(page),
@@ -178,7 +163,7 @@ class EISClient:
             "pc": "on",
             "pa": "on",
             "currencyIdGeneral": "-1",
-            "customerInn": inn,
+            "customerIdOrg": inn,          # <-- исправлено
             "publishDateFrom": date_from,
             "publishDateTo": date_to,
         }
@@ -196,7 +181,6 @@ class EISClient:
         page: int,
         page_size: int,
     ) -> List[Dict]:
-        """HTML-парсинг результатов по ключевому слову."""
         params = {
             "searchString": keyword,
             "morphology": "on",
@@ -222,8 +206,9 @@ class EISClient:
         return self._fetch_html_results(params, context=f"keyword={keyword}")
 
     def _fetch_html_results(self, params: dict, context: str = "") -> List[Dict]:
-        """HTML-запрос к странице результатов и парсинг таблицы."""
         try:
+            log("eis_client", f"Запрос к ЕИС [{context}]: {SEARCH_URL}?" +
+                "&".join(f"{k}={v}" for k, v in params.items() if v))
             resp = self.session.get(SEARCH_URL, params=params, timeout=30)
             resp.raise_for_status()
             tenders = self._parse_html(resp.text)
@@ -239,19 +224,12 @@ class EISClient:
             log("eis_client", f"Ошибка [{context}]: {e}", level="ERROR", details=str(e))
             return []
 
-    # ------------------------------------------------------------------
-    # Парсинг HTML
-    # ------------------------------------------------------------------
-
     def _parse_html(self, html: str) -> List[Dict]:
-        """Извлечь закупки из HTML-страницы результатов единого стиля."""
         soup = BeautifulSoup(html, "html.parser")
         tenders = []
 
-        # Каждая закупка — блок .registry-entry__form
         cards = soup.select(".registry-entry__form, .search-registry-entry-block")
         if not cards:
-            # запасной вариант
             cards = soup.select("div[class*='registry-entry']") or soup.select(".order-row")
 
         for card in cards:
@@ -265,7 +243,6 @@ class EISClient:
         return tenders
 
     def _parse_card(self, card) -> Optional[Dict]:
-        """Извлечь данные из одной карточки закупки."""
         # Номер закупки
         number_el = (
             card.select_one(".registry-entry__header-mid__number a") or
@@ -282,13 +259,12 @@ class EISClient:
         if source_url and not source_url.startswith("http"):
             source_url = BASE_URL + source_url
 
-        # ID — извлекаем из URL или из номера
         external_id = purchase_number
         m = re.search(r"regNumber=([\w-]+)", source_url)
         if m:
             external_id = m.group(1)
 
-        # Название закупки
+        # Название
         title_el = (
             card.select_one(".registry-entry__body-value") or
             card.select_one(".subject-name") or
@@ -304,23 +280,38 @@ class EISClient:
         )
         customer_name = customer_el.get_text(strip=True) if customer_el else ""
 
-        # ИНН заказчика — попытаемся извлечь из доп. значений
+        # --- Исправление 3: ИНН из подписи к полю «ИНН», а не любое 10-значное число ---
         customer_inn = ""
-        for el in card.select(".registry-entry__body-value"):
-            text = el.get_text(strip=True)
-            if re.match(r"^\d{10}$|^\d{12}$", text):
-                customer_inn = text
-                break
+        # Вариант 1: явный label «ИНН»
+        for label_el in card.select(".registry-entry__body-block"):
+            label_text = label_el.get_text(" ", strip=True).upper()
+            if "ИНН" in label_text:
+                inn_match = re.search(r"\b(\d{10}|\d{12})\b", label_text)
+                if inn_match:
+                    customer_inn = inn_match.group(1)
+                    break
+        # Вариант 2: атрибут data-inn / data-customer-inn
+        if not customer_inn:
+            for attr in ("data-inn", "data-customer-inn", "data-org-inn"):
+                val = card.get(attr, "")
+                if re.match(r"^\d{10}$|^\d{12}$", val):
+                    customer_inn = val
+                    break
+        # Вариант 3: запасной — из ссылки на заказчика
+        if not customer_inn and customer_el:
+            href = customer_el.get("href", "")
+            m_inn = re.search(r"inn=(\d{10,12})", href)
+            if m_inn:
+                customer_inn = m_inn.group(1)
 
-        # Дата публикации
+        # Дата
         date_el = (
             card.select_one(".data-block__value") or
             card.select_one(".publish-date")
         )
         publish_date = ""
         if date_el:
-            raw_date = date_el.get_text(strip=True)
-            publish_date = self._normalize_date(raw_date)
+            publish_date = self._normalize_date(date_el.get_text(strip=True))
 
         # Регион
         region_el = card.select_one(".registry-entry__body-value:last-of-type")
@@ -348,24 +339,14 @@ class EISClient:
 
     @staticmethod
     def _normalize_date(raw: str) -> str:
-        """Привести дату еИС к формату YYYY-MM-DD."""
         raw = raw.strip()
-        # DD.MM.YYYY HH:MM или DD.MM.YYYY
         m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", raw)
         if m:
             return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
         return raw
 
 
-# ------------------------------------------------------------------
-# RSS-альтернатива (используется для быстрой проверки по ключевым словам)
-# ------------------------------------------------------------------
-
 def fetch_rss_tenders(keyword: str, region: Optional[str] = None) -> List[Dict]:
-    """
-    Быстрый путь: запрос RSS-потока ЕИС без авторизации.
-    Возвращает до 100 последних закупок в формате словарей.
-    """
     params = {
         "searchString": keyword,
         "morphology": "on",
@@ -379,9 +360,7 @@ def fetch_rss_tenders(keyword: str, region: Optional[str] = None) -> List[Dict]:
         params["customerPlace"] = region
 
     try:
-        resp = requests.get(
-            RSS_URL, params=params, headers=HEADERS, timeout=20
-        )
+        resp = requests.get(RSS_URL, params=params, headers=HEADERS, timeout=20)
         resp.raise_for_status()
         return _parse_rss(resp.text)
     except Exception as e:
@@ -390,11 +369,9 @@ def fetch_rss_tenders(keyword: str, region: Optional[str] = None) -> List[Dict]:
 
 
 def _parse_rss(xml_text: str) -> List[Dict]:
-    """Парсинг RSS/XML ответа еИС."""
     tenders = []
     try:
         root = ET.fromstring(xml_text)
-        ns = {"atom": "http://www.w3.org/2005/Atom"}
         channel = root.find("channel")
         if channel is None:
             return []
@@ -404,13 +381,11 @@ def _parse_rss(xml_text: str) -> List[Dict]:
             description = (item.findtext("description") or "").strip()
             pub_date = (item.findtext("pubDate") or "").strip()
 
-            # external_id — из ссылки
             external_id = link
             m = re.search(r"regNumber=([\w-]+)", link)
             if m:
                 external_id = m.group(1)
 
-            # Дата
             publish_date = ""
             dm = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", pub_date)
             if dm:
