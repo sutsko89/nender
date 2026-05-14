@@ -1,25 +1,4 @@
-"""Модуль получения закупок с ЕИС без авторизации.
-
-Публичный поиск (не требует логина и токена):
-  https://zakupki.gov.ru/epz/order/extendedsearch/results.html
-
-Параметры URL:
-  searchString     — ключевые слова
-  morphology       — on (морфология)
-  pageNumber       — номер страницы
-  recordsPerPage   — _10 / _20 / _50
-  sortBy           — UPDATE_DATE
-  sortDirection    — false (по убыванию)
-  fz44             — on (включить 44-ФЗ)
-  fz223            — on (включить 223-ФЗ)
-  customerPlace    — название региона (русским)
-  customerIdOrg    — ИНН заказчика (НЕ customerInn!)
-  publishDateFrom  — дата от (DD.MM.YYYY)
-  publishDateTo    — дата до (DD.MM.YYYY)
-
-RSS-поток (XML, до последних 100 записей без авторизации):
-  https://zakupki.gov.ru/epz/order/extendedsearch/rss
-"""
+"""Модуль получения закупок с ЕИС без авторизации."""
 
 import re
 import time
@@ -47,12 +26,10 @@ HEADERS = {
     "Referer": "https://zakupki.gov.ru/epz/main/public/home.html",
 }
 
-# Окно поиска по умолчанию — 7 дней (чтобы не пропустить закупки с задержкой индексации)
 DEFAULT_DAYS_BACK = 7
 
 
 class EISClient:
-    """Клиент публичного поиска ЕИС без авторизации."""
 
     def __init__(self):
         self.session = requests.Session()
@@ -63,9 +40,7 @@ class EISClient:
 
     def check_connection(self) -> tuple:
         try:
-            resp = self.session.get(
-                BASE_URL + "/epz/main/public/home.html", timeout=15
-            )
+            resp = self.session.get(BASE_URL + "/epz/main/public/home.html", timeout=15)
             if resp.status_code == 200:
                 return True, "Сайт ЕИС доступен"
             return False, f"Сервер вернул код {resp.status_code}"
@@ -87,7 +62,6 @@ class EISClient:
         page: int = 1,
         page_size: int = 50,
     ) -> List[Dict]:
-        # --- Исправление 2: окно 7 дней по умолчанию ---
         if not date_from:
             date_from = (datetime.now() - timedelta(days=DEFAULT_DAYS_BACK)).strftime("%d.%m.%Y")
         if not date_to:
@@ -99,13 +73,9 @@ class EISClient:
         if inn_list:
             for inn in inn_list:
                 tenders = self._search_by_inn(
-                    inn=inn,
-                    region=region,
-                    keywords=keywords,
-                    date_from=date_from,
-                    date_to=date_to,
-                    page=page,
-                    page_size=page_size,
+                    inn=inn, region=region, keywords=keywords,
+                    date_from=date_from, date_to=date_to,
+                    page=page, page_size=page_size,
                 )
                 for t in tenders:
                     if t["external_id"] not in seen_ids:
@@ -116,12 +86,9 @@ class EISClient:
         if keywords and not inn_list:
             for kw in keywords:
                 tenders = self._search_by_keyword(
-                    keyword=kw,
-                    region=region,
-                    date_from=date_from,
-                    date_to=date_to,
-                    page=page,
-                    page_size=page_size,
+                    keyword=kw, region=region,
+                    date_from=date_from, date_to=date_to,
+                    page=page, page_size=page_size,
                 )
                 for t in tenders:
                     if t["external_id"] not in seen_ids:
@@ -129,24 +96,12 @@ class EISClient:
                         all_tenders.append(t)
                 time.sleep(1)
 
-        log(
-            "eis_client",
+        log("eis_client",
             f"Итого получено {len(all_tenders)} закупок"
-            f" (ИНН: {inn_list}, регион: {region}, ключи: {keywords})",
-        )
+            f" (ИНН: {inn_list}, регион: {region}, ключи: {keywords})")
         return all_tenders
 
-    def _search_by_inn(
-        self,
-        inn: str,
-        region: Optional[str],
-        keywords: Optional[List[str]],
-        date_from: str,
-        date_to: str,
-        page: int,
-        page_size: int,
-    ) -> List[Dict]:
-        # --- Исправление 1: customerInn → customerIdOrg ---
+    def _search_by_inn(self, inn, region, keywords, date_from, date_to, page, page_size):
         params = {
             "searchString": " ".join(keywords) if keywords else "",
             "morphology": "on",
@@ -156,31 +111,18 @@ class EISClient:
             "recordsPerPage": f"_{min(page_size, 50)}",
             "showLotsInfoHidden": "false",
             "sortBy": "UPDATE_DATE",
-            "fz44": "on",
-            "fz223": "on",
-            "af": "on",
-            "ca": "on",
-            "pc": "on",
-            "pa": "on",
+            "fz44": "on", "fz223": "on",
+            "af": "on", "ca": "on", "pc": "on", "pa": "on",
             "currencyIdGeneral": "-1",
-            "customerIdOrg": inn,          # <-- исправлено
+            "customerIdOrg": inn,
             "publishDateFrom": date_from,
             "publishDateTo": date_to,
         }
         if region:
             params["customerPlace"] = region
-
         return self._fetch_html_results(params, context=f"INN={inn}")
 
-    def _search_by_keyword(
-        self,
-        keyword: str,
-        region: Optional[str],
-        date_from: str,
-        date_to: str,
-        page: int,
-        page_size: int,
-    ) -> List[Dict]:
+    def _search_by_keyword(self, keyword, region, date_from, date_to, page, page_size):
         params = {
             "searchString": keyword,
             "morphology": "on",
@@ -190,19 +132,14 @@ class EISClient:
             "recordsPerPage": f"_{min(page_size, 50)}",
             "showLotsInfoHidden": "false",
             "sortBy": "UPDATE_DATE",
-            "fz44": "on",
-            "fz223": "on",
-            "af": "on",
-            "ca": "on",
-            "pc": "on",
-            "pa": "on",
+            "fz44": "on", "fz223": "on",
+            "af": "on", "ca": "on", "pc": "on", "pa": "on",
             "currencyIdGeneral": "-1",
             "publishDateFrom": date_from,
             "publishDateTo": date_to,
         }
         if region:
             params["customerPlace"] = region
-
         return self._fetch_html_results(params, context=f"keyword={keyword}")
 
     def _fetch_html_results(self, params: dict, context: str = "") -> List[Dict]:
@@ -227,8 +164,9 @@ class EISClient:
     def _parse_html(self, html: str) -> List[Dict]:
         soup = BeautifulSoup(html, "html.parser")
         tenders = []
-
-        cards = soup.select(".registry-entry__form, .search-registry-entry-block")
+        cards = soup.select(".registry-entry__form")
+        if not cards:
+            cards = soup.select(".search-registry-entry-block")
         if not cards:
             cards = soup.select("div[class*='registry-entry']") or soup.select(".order-row")
 
@@ -239,18 +177,25 @@ class EISClient:
                     tenders.append(tender)
             except Exception as e:
                 log("eis_client", f"Ошибка парсинга карточки: {e}", level="WARNING")
-
         return tenders
 
     def _parse_card(self, card) -> Optional[Dict]:
-        # Номер закупки
-        number_el = (
-            card.select_one(".registry-entry__header-mid__number a") or
-            card.select_one(".title a") or
-            card.select_one("a[href*='regNumber']") or
-            card.select_one("a[href*='notice']") or
-            card.select_one(".lot-number")
-        )
+        """
+        Разбор карточки закупки с сайта ЕИС.
+
+        Структура HTML-карточки (актуальная вёрстка):
+
+          .registry-entry__header-top         <- статус ("Размещена")
+          .registry-entry__header-mid         <- номер закупки
+            .registry-entry__header-mid__number a  <- номер + ссылка
+          .registry-entry__body               <- тело
+            блок «Объект закупки»    <- название (значение после label)
+            блок «Заказчик»             <- название организации + ИНН
+            блок «Регион»               <- регион (на основе label)
+            блок «Дата»                 <- дата публикации
+        """
+        # --- Номер и ссылка ---
+        number_el = card.select_one(".registry-entry__header-mid__number a")
         if not number_el:
             return None
 
@@ -264,65 +209,72 @@ class EISClient:
         if m:
             external_id = m.group(1)
 
-        # Название
-        title_el = (
-            card.select_one(".registry-entry__body-value") or
-            card.select_one(".subject-name") or
-            card.select_one(".lot-subject")
-        )
-        title = title_el.get_text(strip=True) if title_el else purchase_number
-
-        # Заказчик
-        customer_el = (
-            card.select_one(".registry-entry__body-href a") or
-            card.select_one(".customer-name a") or
-            card.select_one(".org-name")
-        )
-        customer_name = customer_el.get_text(strip=True) if customer_el else ""
-
-        # --- Исправление 3: ИНН из подписи к полю «ИНН», а не любое 10-значное число ---
-        customer_inn = ""
-        # Вариант 1: явный label «ИНН»
-        for label_el in card.select(".registry-entry__body-block"):
-            label_text = label_el.get_text(" ", strip=True).upper()
-            if "ИНН" in label_text:
-                inn_match = re.search(r"\b(\d{10}|\d{12})\b", label_text)
-                if inn_match:
-                    customer_inn = inn_match.group(1)
-                    break
-        # Вариант 2: атрибут data-inn / data-customer-inn
-        if not customer_inn:
-            for attr in ("data-inn", "data-customer-inn", "data-org-inn"):
-                val = card.get(attr, "")
-                if re.match(r"^\d{10}$|^\d{12}$", val):
-                    customer_inn = val
-                    break
-        # Вариант 3: запасной — из ссылки на заказчика
-        if not customer_inn and customer_el:
-            href = customer_el.get("href", "")
-            m_inn = re.search(r"inn=(\d{10,12})", href)
-            if m_inn:
-                customer_inn = m_inn.group(1)
-
-        # Дата
-        date_el = (
-            card.select_one(".data-block__value") or
-            card.select_one(".publish-date")
-        )
-        publish_date = ""
-        if date_el:
-            publish_date = self._normalize_date(date_el.get_text(strip=True))
-
-        # Регион
-        region_el = card.select_one(".registry-entry__body-value:last-of-type")
-        region = region_el.get_text(strip=True) if region_el else ""
-
-        # Статус
-        status_el = (
-            card.select_one(".registry-entry__header-top__title") or
-            card.select_one(".purchase-status")
-        )
+        # --- Статус ---
+        status_el = card.select_one(".registry-entry__header-top__title span")
+        if not status_el:
+            status_el = card.select_one(".registry-entry__header-top__title")
         status = status_el.get_text(strip=True) if status_el else ""
+
+        # --- Парсинг блоков по label ---
+        # Все блоки вида:
+        #   <div class="registry-entry__body-block">
+        #     <span class="registry-entry__body-title">Объект закупки</span>
+        #     <span class="registry-entry__body-value">...название...</span>
+        #   </div>
+        title = ""
+        customer_name = ""
+        customer_inn = ""
+        region = ""
+        publish_date = ""
+
+        for block in card.select(".registry-entry__body-block"):
+            label_el = block.select_one(".registry-entry__body-title")
+            value_el = block.select_one(".registry-entry__body-value")
+            if not label_el or not value_el:
+                continue
+            label = label_el.get_text(strip=True).lower()
+            value = value_el.get_text(" ", strip=True)
+
+            if "объект" in label or "предмет" in label:
+                title = value
+            elif "заказчик" in label:
+                customer_name = value
+                # ИНН часто в соседнем блоке или внутри value
+                inn_m = re.search(r"\b(\d{10}|\d{12})\b", value)
+                if inn_m:
+                    customer_inn = inn_m.group(1)
+            elif "инн" in label:
+                inn_m = re.search(r"\b(\d{10}|\d{12})\b", value)
+                if inn_m:
+                    customer_inn = inn_m.group(1)
+            elif "регион" in label or "место" in label:
+                region = value
+            elif "дата" in label or "размещен" in label:
+                publish_date = self._normalize_date(value)
+
+        # --- Запасные варианты ---
+        # Если title всё ещё пустой — берём первый .registry-entry__body-value
+        if not title:
+            val = card.select_one(".registry-entry__body-value")
+            if val:
+                title = val.get_text(strip=True)
+
+        # Дата из .data-block
+        if not publish_date:
+            date_el = card.select_one(".data-block__value")
+            if date_el:
+                publish_date = self._normalize_date(date_el.get_text(strip=True))
+
+        # ИНН из ссылки на заказчика
+        if not customer_inn:
+            customer_link = card.select_one(".registry-entry__body-href a")
+            if customer_link:
+                if not customer_name:
+                    customer_name = customer_link.get_text(strip=True)
+                href = customer_link.get("href", "")
+                m_inn = re.search(r"inn=(\d{10,12})", href)
+                if m_inn:
+                    customer_inn = m_inn.group(1)
 
         return {
             "external_id": external_id,
